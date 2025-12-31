@@ -59,12 +59,12 @@ private:
     }
 
     void onRawDataReceived(const char* data, size_t len){
-        std::vector<std::string> messages;
+        std::vector<FrameProtocolCodec::DecodedPacket> messages;
         codec_->decode(data, len, messages);
         //处理解析后的内容
         for (const auto& msg : messages){
             time_t t = time(nullptr);
-            std::cout << std::ctime(&t) << msg << std::endl;
+            std::cout << std::ctime(&t) << msg.body << std::endl;
         }
     }
 

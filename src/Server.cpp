@@ -24,12 +24,21 @@ public:
             [this](const char* data, size_t len) {onRawDataReceived(data,len);}
         );
     }
+    using MsgHandler = std::function<void(const FrameProtocolCodec::DecodedPacket&)>;
+    void setMsgHandler(MsgHandler handler) {
+        msgHandler_ = std::move(handler);
+    }
 
     void sendMessage(const std::string& msg){
         auto frames = codec_->encode(sentMsgUid_++, msg);
         for(auto& frame : frames){
             connection_->sendBytes(std::move(frame.data));
         }
+    }
+
+    void sendHeartBeat(){
+        auto frame = codec_->createHeartbeatFrame();
+        connection_->sendBytes(std::move(frame.data));
     }
 
     void start() {
@@ -50,11 +59,15 @@ public:
 
 private:
     void onRawDataReceived(const char* data, size_t len){
-        std::vector<std::string> messages;
+        std::vector<FrameProtocolCodec::DecodedPacket> messages;
         codec_->decode(data, len, messages);
         //处理解析后的内容
         for (const auto& msg : messages){
-            sendMessage(msg);
+            if(msg.ptype == ProtoInfo::HEARTBEAT){
+                //做一些别的处理
+                continue;
+            }
+            msgHandler_(msg);
         }
     }
 
@@ -66,6 +79,8 @@ private:
     uint64_t sentMsgUid_ = 0;
     std::shared_ptr<TcpConnection> connection_;
     std::unique_ptr<FrameProtocolCodec> codec_;
+
+    MsgHandler msgHandler_; //数据包处理回调 Manager注入
 };
 
 class SessionManager{
@@ -86,6 +101,10 @@ public:
         auto conn = std::make_shared<TcpConnection>(std::move(_socket), new_id);
         std::shared_ptr<ClientSession> session = std::make_shared<ClientSession>(conn);
         
+        session->setMsgHandler([this](const FrameProtocolCodec::DecodedPacket& pkt) {
+            this->DispatchMessagePkg(pkt);
+        });
+
         session->start();
         activeSessions_.emplace(new_id, session);
         return new_id;
@@ -100,6 +119,13 @@ public:
         }
         int result =  activeSessions_.erase(_sessionId);
         return result == 0 ? 1 : 0;
+    }
+    //DispatchMessage和windows函数重名
+    void DispatchMessagePkg(const FrameProtocolCodec::DecodedPacket& pkt) {
+        // 处理聊天，广播给所有人 (排除自己或不排除)
+        //std::string chatContent = "User[" + std::to_string(senderId) + "] says: " + pkt.body;
+        std::cout << "DispatchMessagePkg Got Message: " << pkt.body << std::endl;
+        BroadCastMsg(pkt.body); // 传入 senderId 以便排除自己
     }
 
     int BroadCastMsg(const std::string& _msg){
@@ -152,7 +178,7 @@ private:
             for(auto &[id, session] : activeSessions_){
                 if(session){
                     // 发送轻量心跳，可自定义格式
-                    session->sendMessage("__HEARTBEAT__");
+                    session->sendHeartBeat();
                 } else {
                     IdToDelete.push_back(id);
                 }

@@ -16,7 +16,8 @@ namespace ProtoFlags{
 namespace ProtoInfo {
     constexpr uint8_t VERSION = 1;
     enum ProtocolType : uint8_t {
-        NORMAL = 0
+        NORMAL = 0,
+        HEARTBEAT = 1,
     };
 }
 

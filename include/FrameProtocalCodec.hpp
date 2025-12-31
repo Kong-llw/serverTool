@@ -40,6 +40,12 @@ public:
         std::vector<char> data;
     };
 
+    struct DecodedPacket {
+        uint64_t msgId;     // 业务ID
+        uint8_t ptype;      // 协议类型 (NORMAL / HEARTBEAT)
+        std::string body;   // 实际数据
+    };
+
     static std::vector<BinaryFrame> encode(uint64_t _msgId, const std::string& _msg){
         if (_msg.empty() || _msg.size() > MAX_DATA_SIZE) {
             throw std::invalid_argument("Input msg Err, size :" + std::to_string(_msg.size()));
@@ -90,9 +96,8 @@ public:
         return frames;
     }
 
-    void decode(const char* _data, size_t len, std::vector<std::string>& _outMsg){
+    void decode(const char* _data, size_t len, std::vector<DecodedPacket>& _outMsg){
         buffer_.insert(buffer_.end(), _data, _data+len);
-
         while(buffer_.size() >= PROTO_HEADER_SIZE){
             ProtoHeader* hdr = reinterpret_cast<ProtoHeader*>(buffer_.data());
 
@@ -100,6 +105,11 @@ public:
                 buffer_.clear();
                 std::cerr << "Protocol Error: Version Mismatch" << std::endl;
                 return;
+            }
+
+            if(hdr->ptype == ProtoInfo::HEARTBEAT){
+                buffer_.erase(buffer_.begin(), buffer_.begin() + sizeof(ProtoHeader));
+                continue;
             }
 
             uint16_t payloadLen = ntohs(hdr->payload_len);
@@ -119,13 +129,50 @@ public:
         }
     }
 
+    static BinaryFrame createHeartbeatFrame(){
+        BinaryFrame rt;
+        ProtoHeader hdr;
+        std::memset(&hdr, 0, sizeof(ProtoHeader)); 
+        hdr.header = htonl(0x48123123); 
+        hdr.version = ProtoInfo::VERSION;
+        hdr.ptype = ProtoInfo::HEARTBEAT;
+        rt.data.resize(sizeof(ProtoHeader));
+        std::memcpy(rt.data.data(), &hdr, sizeof(ProtoHeader));
+
+        return rt;
+    }
+
+    // 通用函数：支持 string, vector<char> 等
+    std::string ToHex(const std::string& data) {
+        std::stringstream ss;
+        // 设置格式：16进制，大写，填充0
+        ss << std::hex << std::uppercase << std::setfill('0');
+        
+        for (unsigned char c : data) {
+            // 关键点：(int)c 强制把字符当数字处理
+            // setw(2) 保证像 0x5 打印成 05
+            ss << std::setw(2) << static_cast<int>(c) << " ";
+        }
+        return ss.str();
+    }
+
+    // 重载一个版本支持 vector<char> (如果你用 vector 存 buffer)
+    std::string ToHex(const std::vector<char>& data) {
+        std::string str(data.begin(), data.end());
+        return ToHex(str);
+    }
+
 private:
-    void handleSingleFrame(const ProtoHeader* _hdr, const char* _body, uint16_t _len, std::vector<std::string>& _outMsg){
+    void handleSingleFrame(const ProtoHeader* _hdr, const char* _body, uint16_t _len, std::vector<DecodedPacket>& _outMsg){
         uint16_t flags = ntohs(_hdr->flags);
         uint64_t msg_id = (static_cast<uint64_t>(ntohl(_hdr->msg_id_high)) << 32) | ntohl(_hdr->msg_id_low);
         uint16_t seq = ntohs(_hdr->seq);
         uint16_t total = ntohs(_hdr->total);
         uint32_t expected_checksum = ntohl(_hdr->checksum);
+
+        std::string a;
+        a.append(_body,_len);
+        std::cout << "handleSingleFrame Got Message" << ToHex(a) << std::endl;
 
         bool isFrag = (flags & ProtoFlags::FRAGMENTED);
         bool isEndpart = (flags & ProtoFlags::ENDPART);
@@ -135,7 +182,9 @@ private:
             if(adl != expected_checksum){
                 throw std::runtime_error("Checksum mismatch! Data corrupted.");
             }
-            _outMsg.emplace_back(_body, _len);
+            DecodedPacket pkt{msg_id, _hdr->ptype, ""};
+            pkt.body.append(_body, _len);
+            _outMsg.push_back(std::move(pkt));
             return;
         }
         
@@ -178,8 +227,8 @@ private:
             if(adl != expected_checksum){
                 throw std::runtime_error("Checksum mismatch! Data corrupted.");
             }
-
-            _outMsg.push_back(std::move(fullMsg));
+            DecodedPacket pkt{msg_id, _hdr->ptype, std::move(fullMsg)};
+            _outMsg.push_back(std::move(pkt));
             fragCache_.erase(msg_id);
         }
     }
@@ -194,7 +243,7 @@ private:
                                          uint16_t total = 0, 
                                          uint32_t checksum = 0) {
         ProtoHeader rt;
-        rt.header = 0x48123123; //
+        rt.header = htonl(0x48123123); //
         rt.version = version;
         rt.ptype = ptype;
         rt.payload_len = htons(payload_len);
