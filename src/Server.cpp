@@ -11,6 +11,8 @@
 
 #include "TcpConnection.hpp"
 #include "FrameProtocalCodec.hpp"
+#include "JSONTranslator.hpp"
+#include "RoomManager.hpp"
 
 using tcp = asio::ip::tcp;
 #define SERVER_PORT 20002
@@ -24,13 +26,13 @@ public:
             [this](const char* data, size_t len) {onRawDataReceived(data,len);}
         );
     }
-    using MsgHandler = std::function<void(const FrameProtocolCodec::DecodedPacket&)>;
+    using MsgHandler = std::function<void(const FrameProtocolCodec::DecodedPacket&, const std::shared_ptr<ClientSession>)>;
     void setMsgHandler(MsgHandler handler) {
         msgHandler_ = std::move(handler);
     }
 
-    void sendMessage(const std::string& msg){
-        auto frames = codec_->encode(sentMsgUid_++, msg);
+    void sendMessage(const std::string& msg, ProtoInfo::ProtocolType ptype = ProtoInfo::ProtocolType::NORMAL){
+        auto frames = codec_->encode(sentMsgUid_++, msg, ptype);
         for(auto& frame : frames){
             connection_->sendBytes(std::move(frame.data));
         }
@@ -53,6 +55,10 @@ public:
         sendMessage(server_msg);
     }
 
+    uint64_t getId() const {
+        return connection_->getId();
+    }
+
     void closeConnection(){
         connection_->close();
     }
@@ -63,11 +69,20 @@ private:
         codec_->decode(data, len, messages);
         //处理解析后的内容
         for (const auto& msg : messages){
-            if(msg.ptype == ProtoInfo::HEARTBEAT){
-                //做一些别的处理
+            if(msg.info.ptype == ProtoInfo::HEARTBEAT){
+                /*
+                connection_->post_to_strand([self = shared_from_this(), msg = std::move(msg)]() mutable
+                {
+                    self->handleHeartbeat(std::move(msg));
+                });                */
+
                 continue;
             }
-            msgHandler_(msg);
+            connection_->post_to_strand([self = shared_from_this(), msg = std::move(msg)]() mutable 
+            {
+                if(self->msgHandler_)
+                    self->msgHandler_(std::move(msg), self);
+            });
         }
     }
 
@@ -88,6 +103,10 @@ public:
     explicit SessionManager(asio::any_io_executor exec)
         : executor_(exec), heartbeat_timer_(exec) {
         start_heartbeat();
+        roomManager_ = &RoomManager::instance();
+        roomManager_->setSendCallback(std::move([this](uint64_t room_id, const std::string& msg){
+            this->BroadCastRoomMsg(room_id, msg);
+        }));
     }
     ~SessionManager() = default;
 
@@ -100,9 +119,9 @@ public:
 
         auto conn = std::make_shared<TcpConnection>(std::move(_socket), new_id);
         std::shared_ptr<ClientSession> session = std::make_shared<ClientSession>(conn);
-        
-        session->setMsgHandler([this](const FrameProtocolCodec::DecodedPacket& pkt) {
-            this->DispatchMessagePkg(pkt);
+
+        session->setMsgHandler([this](const FrameProtocolCodec::DecodedPacket& pkt, const std::shared_ptr<ClientSession> senderSession) {
+            this->ProcessMessagePkt(pkt, senderSession);
         });
 
         session->start();
@@ -120,12 +139,35 @@ public:
         int result =  activeSessions_.erase(_sessionId);
         return result == 0 ? 1 : 0;
     }
+
     //DispatchMessage和windows函数重名
-    void DispatchMessagePkg(const FrameProtocolCodec::DecodedPacket& pkt) {
+    void ProcessMessagePkt(const FrameProtocolCodec::DecodedPacket& pkt, const std::shared_ptr<ClientSession> senderSession){ 
         // 处理聊天，广播给所有人 (排除自己或不排除)
         //std::string chatContent = "User[" + std::to_string(senderId) + "] says: " + pkt.body;
         std::cout << "DispatchMessagePkg Got Message: " << pkt.body << std::endl;
-        BroadCastMsg(pkt.body); // 传入 senderId 以便排除自己
+        switch(pkt.info.ptype){
+            case ProtoInfo::NORMAL:
+                BroadCastMsg(pkt.body);
+                break;
+            case ProtoInfo::JSONCOMMAND:
+                // 处理命令
+                std::cout << "Received Command: " << pkt.body << std::endl;
+                //JSONTranslator::ParseCommand(pkt.body);
+                BroadCastMsg(pkt.body);
+                return;
+            case ProtoInfo::JSONDATA:
+                // 处理数据
+                std::cout << "Received Data: " << pkt.body << std::endl;
+                return;
+            case ProtoInfo::ROOMREQ:
+                // 处理房间请求
+                ParseRoomReq(pkt.body, senderSession);
+                std::cout << "Received Room Request: " << pkt.body << std::endl;
+                return;
+            default:
+                std::cerr << "Unknown Protocol Type: " << static_cast<int>(pkt.info.ptype) << std::endl;
+                return;
+        }
     }
 
     int BroadCastMsg(const std::string& _msg){
@@ -150,6 +192,18 @@ public:
         return 0;
     }
 
+    int BroadCastRoomMsg(uint64_t room_id, const std::string& msg){
+        std::shared_lock<std::shared_mutex> read_lock(rw_mutex_);
+        auto playerIds = roomManager_->getRoomPlayerIds(room_id);
+        for(auto playerId : playerIds){
+            auto iter = activeSessions_.find(playerId);
+            if(iter != activeSessions_.end() && iter->second != nullptr){
+                iter->second->sendMessage(msg);
+            }
+        }
+        return 0;
+    }
+
     bool isConnectionFull() {
         std::shared_lock<std::shared_mutex> lock(rw_mutex_);
         return activeSessions_.size() >= MAX_CONNECTION_NUM;
@@ -163,6 +217,7 @@ private:
     asio::any_io_executor executor_;
     asio::steady_timer heartbeat_timer_;
     const std::chrono::seconds HEARTBEAT_INTERVAL{5};
+    RoomManager* roomManager_ = nullptr;
 
     void start_heartbeat(){
         heartbeat_timer_.expires_after(HEARTBEAT_INTERVAL);
@@ -192,6 +247,90 @@ private:
 
         // 继续下一次定时
         start_heartbeat();
+    }
+
+    void ParseRoomReq(const std::string& req, const std::shared_ptr<ClientSession> senderSession){
+        if(req.empty()) return;
+        //解析房间请求
+        //TODO: 需要校验请求长度，不然一个假请求过来就崩溃了
+        int offset = 0;
+        RoomResult out_res = RoomResult::UNKNOWN_ERROR;
+        uint8_t reqType = req[0];
+        offset++;
+        switch(reqType){
+            case ProtoInfo::RoomReqType::CREATEROOM:{
+                int nameLen = req[offset];
+                offset++;
+                std::string name = req.substr(offset, nameLen);
+                offset += nameLen;
+                int passwdLen = req[offset];
+                offset++;
+                std::string passwd = req.substr(offset, passwdLen);
+                offset += passwdLen;
+
+                std::string out_room_code;
+                roomManager_->createRoom(senderSession->getId(), 4, name, passwd, out_room_code, out_res);
+
+                std::string msg = JSONTranslator::serializeCreateRoomResult(out_room_code, out_res);
+                msg.insert(0, sizeof(ProtoInfo::RoomReqType), static_cast<char>(ProtoInfo::RoomReqType::CREATEROOM));
+                senderSession->sendMessage(msg, ProtoInfo::ProtocolType::ROOMRSP);
+                break;
+            }
+
+            case ProtoInfo::RoomReqType::JOINROOM:{
+                std::string room_code = req.substr(offset, 6);
+                offset += 6;
+                uint64_t room_id = roomManager_->getRoomId(room_code);
+                std::string msg(1,ProtoInfo::RoomReqType::JOINROOM);
+                if(room_id == 0){
+                    msg.append(1, static_cast<char>(RoomResult::NOT_FOUND));
+                    senderSession->sendMessage(msg, ProtoInfo::ProtocolType::ROOMRSP);
+                    break;
+                }
+
+                out_res = roomManager_->joinRoom(room_id, senderSession->getId());
+                msg.append(1, static_cast<char>(out_res));
+                senderSession->sendMessage(msg, ProtoInfo::ProtocolType::ROOMRSP);
+                break;
+            }
+            case ProtoInfo::RoomReqType::LEAVEROOM:{
+                std::string room_code = req.substr(offset, 6);
+                offset += 6;
+                uint64_t room_id = roomManager_->getRoomId(room_code);
+                if(room_id == 0) break;
+
+                out_res = roomManager_->leaveRoom(room_id, senderSession->getId());
+                std::string msg(1,ProtoInfo::RoomReqType::LEAVEROOM);
+                msg.append(1, static_cast<char>(out_res));
+                senderSession->sendMessage(msg, ProtoInfo::ProtocolType::ROOMRSP);
+                break;
+            }
+            case ProtoInfo::RoomReqType::LISTROOMS:{
+                auto rooms = roomManager_->listRooms();
+                out_res = rooms.empty()? RoomResult::OK : RoomResult::NOT_FOUND;
+
+                std::string msg = JSONTranslator::serializeRoomList(rooms);
+                msg.insert(0, sizeof(ProtoInfo::RoomReqType), static_cast<char>(ProtoInfo::RoomReqType::LISTROOMS));
+                senderSession->sendMessage(msg, ProtoInfo::ProtocolType::ROOMRSP);
+                break;
+            }
+            case ProtoInfo::RoomReqType::SETREADY:{
+                break;
+            }
+            case ProtoInfo::RoomReqType::SETCAPACITY:{
+                break;
+            }
+            case ProtoInfo::RoomReqType::STARTGAME:{
+                break;
+            }
+            case ProtoInfo::RoomReqType::DISSOLVEROOM:{
+                break;
+            }
+            default:
+                std::cerr << "Unknown Room Request Type: " << static_cast<int>(reqType) << std::endl;
+                break;
+        }
+
     }
 
     SessionManager() = delete;

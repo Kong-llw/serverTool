@@ -40,13 +40,16 @@ public:
         std::vector<char> data;
     };
 
+    struct DecPktInfo {
+        uint64_t msgId; 
+        ProtoInfo::ProtocolType ptype;
+    };
     struct DecodedPacket {
-        uint64_t msgId;     // 业务ID
-        uint8_t ptype;      // 协议类型 (NORMAL / HEARTBEAT)
+        DecPktInfo info;     
         std::string body;   // 实际数据
     };
 
-    static std::vector<BinaryFrame> encode(uint64_t _msgId, const std::string& _msg){
+    static std::vector<BinaryFrame> encode(uint64_t _msgId, const std::string& _msg, ProtoInfo::ProtocolType ptype = ProtoInfo::ProtocolType::NORMAL){
         if (_msg.empty() || _msg.size() > MAX_DATA_SIZE) {
             throw std::invalid_argument("Input msg Err, size :" + std::to_string(_msg.size()));
         }
@@ -56,7 +59,7 @@ public:
         //不需要拆分的包发送逻辑
         if(_msg.size() <= CHUNK_SIZE){
             BinaryFrame frame;
-            ProtoHeader hdr = createProtoHeader(ProtoInfo::VERSION, ProtoInfo::ProtocolType::NORMAL, _msg.size(), _msgId,
+            ProtoHeader hdr = createProtoHeader(ProtoInfo::VERSION, ptype, _msg.size(), _msgId,
                 ProtoFlags::SHORTMSG | ProtoFlags::CHECKSUM, 0, 0, totalCheckSum);
             frame.data.resize(sizeof(ProtoHeader) + _msg.size());
             std::memcpy(frame.data.data(), &hdr, sizeof(ProtoHeader));
@@ -77,11 +80,11 @@ public:
             ProtoHeader hdr;
             if(i != totalParts - 1){
                 uint32_t adl = adler32_update(1, reinterpret_cast<const char*>(msgPiece.data()), msgPiece.size());
-                hdr = createProtoHeader(ProtoInfo::VERSION, ProtoInfo::ProtocolType::NORMAL, msgPiece.size(), _msgId,
+                hdr = createProtoHeader(ProtoInfo::VERSION, ptype, msgPiece.size(), _msgId,
                     ProtoFlags::FRAGMENTED | ProtoFlags::CHECKSUM, i, totalParts, adl);
             }
             else{
-                hdr = createProtoHeader(ProtoInfo::VERSION, ProtoInfo::ProtocolType::NORMAL, msgPiece.size(), _msgId,
+                hdr = createProtoHeader(ProtoInfo::VERSION, ptype, msgPiece.size(), _msgId,
                     ProtoFlags::ENDPART | ProtoFlags::FRAGMENTED | ProtoFlags::CHECKSUM, i, totalParts, totalCheckSum);
             }
             
@@ -100,6 +103,31 @@ public:
         buffer_.insert(buffer_.end(), _data, _data+len);
         while(buffer_.size() >= PROTO_HEADER_SIZE){
             ProtoHeader* hdr = reinterpret_cast<ProtoHeader*>(buffer_.data());
+
+            if (hdr->header != PROTO_MAGIC) {
+                // 魔数不匹配 → 不是合法包的开头，逐字节后移1位，查找下一个魔数位置
+                auto magicPtr = reinterpret_cast<const uint32_t*>(buffer_.data());
+                bool foundMagic = false;
+                // 遍历缓冲区，直到找到魔数 或 剩余数据不足4字节
+                for (size_t i = 1; i <= buffer_.size() - sizeof(uint32_t); ++i) {
+                    magicPtr = reinterpret_cast<const uint32_t*>(&buffer_[i]);
+                    if (*magicPtr == PROTO_MAGIC) {
+                        // 找到魔数 → 擦除前面的脏数据，锚定到正确位置
+                        buffer_.erase(buffer_.begin(), buffer_.begin() + i);
+                        foundMagic = true;
+                        std::cerr << "Protocol Error: Magic mismatch, find magic at pos " << i << std::endl;
+                        break;
+                    }
+                }
+                // 遍历完没找到魔数 → 缓冲区全是脏数据，清空后退出
+                if (!foundMagic) {
+                    buffer_.clear();
+                    std::cerr << "Protocol Error: No magic found, clear all dirty data" << std::endl;
+                    return;
+                }
+                // 找到魔数后，重新进入循环，解析新的包头
+                continue;
+            }
 
             if(hdr->version != ProtoInfo::VERSION){
                 buffer_.clear();
@@ -133,7 +161,7 @@ public:
         BinaryFrame rt;
         ProtoHeader hdr;
         std::memset(&hdr, 0, sizeof(ProtoHeader)); 
-        hdr.header = htonl(0x48123123); 
+        hdr.header = PROTO_MAGIC; 
         hdr.version = ProtoInfo::VERSION;
         hdr.ptype = ProtoInfo::HEARTBEAT;
         rt.data.resize(sizeof(ProtoHeader));
@@ -182,7 +210,7 @@ private:
             if(adl != expected_checksum){
                 throw std::runtime_error("Checksum mismatch! Data corrupted.");
             }
-            DecodedPacket pkt{msg_id, _hdr->ptype, ""};
+            DecodedPacket pkt{msg_id, static_cast<ProtoInfo::ProtocolType>(_hdr->ptype), ""};
             pkt.body.append(_body, _len);
             _outMsg.push_back(std::move(pkt));
             return;
@@ -227,7 +255,7 @@ private:
             if(adl != expected_checksum){
                 throw std::runtime_error("Checksum mismatch! Data corrupted.");
             }
-            DecodedPacket pkt{msg_id, _hdr->ptype, std::move(fullMsg)};
+            DecodedPacket pkt{msg_id, static_cast<ProtoInfo::ProtocolType>(_hdr->ptype), std::move(fullMsg)};
             _outMsg.push_back(std::move(pkt));
             fragCache_.erase(msg_id);
         }
@@ -243,7 +271,7 @@ private:
                                          uint16_t total = 0, 
                                          uint32_t checksum = 0) {
         ProtoHeader rt;
-        rt.header = htonl(0x48123123); //
+        rt.header = PROTO_MAGIC; //
         rt.version = version;
         rt.ptype = ptype;
         rt.payload_len = htons(payload_len);

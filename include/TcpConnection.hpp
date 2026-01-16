@@ -56,6 +56,12 @@ public:
         });
     }
 
+    template<typename Callable> requires std::invocable<Callable>
+    void post_to_strand(Callable&& task)
+    {
+        asio::post(strand_, std::forward<Callable>(task));
+    }
+
     void close(){
         if(socket_.is_open()){
             asio::error_code ec;
@@ -67,6 +73,7 @@ public:
     bool isConnected(){
         return socket_.is_open() && !socket_.non_blocking();
     }
+    uint64_t getId() const {return connId_;}
     const tcp::socket& getSocket() const {return socket_;}
     
 private:

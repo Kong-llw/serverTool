@@ -5,6 +5,7 @@
 #include <arpa/inet.h>
 
 constexpr size_t PROTO_HEADER_SIZE = 4 + 1 + 1 + 2 + 2 + 4 + 4 + 2 + 2 + 4;
+constexpr uint32_t PROTO_MAGIC = 0x48123123; //协议魔数
 
 namespace ProtoFlags{
     constexpr uint16_t SHORTMSG = 0x0;
@@ -18,12 +19,27 @@ namespace ProtoInfo {
     enum ProtocolType : uint8_t {
         NORMAL = 0,
         HEARTBEAT = 1,
+        JSONCOMMAND = 2,
+        JSONDATA = 3,
+        ROOMREQ = 4,
+        ROOMRSP = 5
+    };
+
+    enum RoomReqType : uint8_t {
+        CREATEROOM = 1,
+        JOINROOM = 2,
+        LEAVEROOM = 3,
+        LISTROOMS = 4,
+        SETREADY = 5,
+        SETCAPACITY = 6,
+        STARTGAME = 7,
+        DISSOLVEROOM = 8
     };
 }
 
 #pragma pack(push, 1)
 struct ProtoHeader {    //内容会以网络字节序写入
-    uint32_t header; // = 0x48123123
+    uint32_t header; // = 0x4812 3123
     uint8_t version;
     uint8_t ptype;
     uint16_t payload_len;
