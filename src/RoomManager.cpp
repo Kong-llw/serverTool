@@ -10,13 +10,15 @@ RoomManager& RoomManager::instance() {
 
 RoomManager::RoomManager() {}
 
-void RoomManager::setSendCallback(SendCallback cb) {
+void RoomManager::RoomBroadCast(uint64_t room_id, const std::string& msg) {
     std::lock_guard<std::mutex> lk(mu_);
-    sendCb_ = std::move(cb);
+    auto it = rooms_.find(room_id);
+    if(it != rooms_.end()) {
+        it->second->broadcast(msg);
+    }
 }
-
-uint64_t RoomManager::createRoom(uint64_t owner_id, size_t capacity, std::string& room_name, std::string& password, std::string& out_room_code, RoomResult& out_res) {
-    if(capacity < 2 || capacity > 16) { out_res = RoomResult::INVALID_CAPACITY; return 0; }
+uint64_t RoomManager::createRoom(RoomInfo info, std::shared_ptr<Player> sender, std::string& out_room_code, RoomResult& out_res) {
+    if(info.capacity < 2 || info.capacity > 16) { out_res = RoomResult::INVALID_CAPACITY; return 0; }
     uint64_t id = next_room_id_.fetch_add(1);
 
     std::string code;
@@ -32,7 +34,7 @@ uint64_t RoomManager::createRoom(uint64_t owner_id, size_t capacity, std::string
             return 0;
         }
     }
-    std::shared_ptr<Room> r = std::make_shared<Room>(id, owner_id, capacity, room_name, code, password, sendCb_);
+    std::shared_ptr<Room> r = std::make_shared<Room>(id, sender, info.capacity, info.room_name, code, info.password, sendCb_);
     {
         std::lock_guard<std::mutex> lk(mu_);
         rooms_.emplace(id, r);
@@ -49,7 +51,7 @@ uint64_t RoomManager::getRoomId(const std::string& room_code){
     return it->second;
 }
 
-RoomResult RoomManager::joinRoom(uint64_t room_id, uint64_t player_id) {
+RoomResult RoomManager::joinRoom(uint64_t room_id, const std::shared_ptr<Player>& pplayer) {
     std::shared_ptr<Room> r;
     {
         std::lock_guard<std::mutex> lk(mu_);
@@ -57,10 +59,10 @@ RoomResult RoomManager::joinRoom(uint64_t room_id, uint64_t player_id) {
         if(it == rooms_.end()) return RoomResult::NOT_FOUND;
         r = it->second;
     }
-    return r->join(player_id);
+    return r->join(pplayer);
 }
 
-RoomResult RoomManager::leaveRoom(uint64_t room_id, uint64_t player_id) {
+RoomResult RoomManager::leaveRoom(uint64_t room_id, const std::shared_ptr<Player>& pplayer) {
     std::shared_ptr<Room> r;
     {
         std::lock_guard<std::mutex> lk(mu_);
@@ -68,10 +70,9 @@ RoomResult RoomManager::leaveRoom(uint64_t room_id, uint64_t player_id) {
         if(it == rooms_.end()) return RoomResult::NOT_FOUND;
         r = it->second;
     }
-    RoomResult res = r->leave(player_id);
+    RoomResult res = r->leave(pplayer);
     // if empty, remove room
-    RoomInfo info = r->getInfo();
-    if(info.player_count == 0) {
+    if(r->roomIsEmpty()) {
         std::lock_guard<std::mutex> lk(mu_);
         rooms_.erase(room_id);
     }
@@ -86,22 +87,7 @@ std::vector<RoomInListInfo> RoomManager::listRooms() {
     return out;
 }
 
-std::optional<RoomInfo> RoomManager::getRoomInfo(uint64_t room_id) {
-    std::lock_guard<std::mutex> lk(mu_);
-    auto it = rooms_.find(room_id);
-    if(it == rooms_.end()) return std::nullopt;
-    return it->second->getInfo();
-}
-
-std::vector<uint64_t> RoomManager::getRoomPlayerIds(uint64_t room_id) {
-    std::lock_guard<std::mutex> lk(mu_);
-    auto it = rooms_.find(room_id);
-    if(it == rooms_.end()) return {};
-    RoomInfo info = it->second->getInfo();
-    return info.player_ids;
-}
-
-RoomResult RoomManager::setReady(uint64_t room_id, uint64_t player_id, bool ready) {
+RoomResult RoomManager::setReady(uint64_t room_id, const std::shared_ptr<Player>& pplayer, bool ready) {
     std::shared_ptr<Room> r;
     {
         std::lock_guard<std::mutex> lk(mu_);
@@ -109,10 +95,10 @@ RoomResult RoomManager::setReady(uint64_t room_id, uint64_t player_id, bool read
         if(it == rooms_.end()) return RoomResult::NOT_FOUND;
         r = it->second;
     }
-    return r->setReady(player_id, ready);
+    return r->setReady(pplayer, ready);
 }
 
-RoomResult RoomManager::setCapacity(uint64_t room_id, uint64_t operator_id, size_t newcap) {
+RoomResult RoomManager::setCapacity(uint64_t room_id, const std::shared_ptr<Player>& pplayer, size_t newcap) {
     std::shared_ptr<Room> r;
     {
         std::lock_guard<std::mutex> lk(mu_);
@@ -120,10 +106,10 @@ RoomResult RoomManager::setCapacity(uint64_t room_id, uint64_t operator_id, size
         if(it == rooms_.end()) return RoomResult::NOT_FOUND;
         r = it->second;
     }
-    return r->setCapacity(operator_id, newcap);
+    return r->setCapacity(pplayer, newcap);
 }
 
-RoomResult RoomManager::startGame(uint64_t room_id, uint64_t operator_id) {
+RoomResult RoomManager::startGame(uint64_t room_id, const std::shared_ptr<Player>& pplayer) {
     std::shared_ptr<Room> r;
     {
         std::lock_guard<std::mutex> lk(mu_);
@@ -131,16 +117,15 @@ RoomResult RoomManager::startGame(uint64_t room_id, uint64_t operator_id) {
         if(it == rooms_.end()) return RoomResult::NOT_FOUND;
         r = it->second;
     }
-    return r->startGame(operator_id);
+    return r->startGame(pplayer);
 }
 
-RoomResult RoomManager::dissolveRoom(uint64_t room_id, uint64_t operator_id) {
+RoomResult RoomManager::dissolveRoom(uint64_t room_id, const std::shared_ptr<Player>& pplayer) {
     std::lock_guard<std::mutex> lk(mu_);
     auto it = rooms_.find(room_id);
     if(it == rooms_.end()) return RoomResult::NOT_FOUND;
     auto r = it->second;
-    RoomInfo info = r->getInfo();
-    if(operator_id != info.owner_id) return RoomResult::NOT_OWNER;
+    if(!r->isRoomOwner(pplayer)) return RoomResult::NOT_OWNER;
     rooms_.erase(it);
     return RoomResult::OK;
 }

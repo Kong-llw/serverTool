@@ -17,7 +17,7 @@ namespace ProtoFlags{
 namespace ProtoInfo {
     constexpr uint8_t VERSION = 1;
     enum ProtocolType : uint8_t {
-        NORMAL = 0,
+        CHATMSG = 0,
         HEARTBEAT = 1,
         JSONCOMMAND = 2,
         JSONDATA = 3,

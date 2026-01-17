@@ -49,7 +49,7 @@ public:
         std::string body;   // 实际数据
     };
 
-    static std::vector<BinaryFrame> encode(uint64_t _msgId, const std::string& _msg, ProtoInfo::ProtocolType ptype = ProtoInfo::ProtocolType::NORMAL){
+    static std::vector<BinaryFrame> encode(uint64_t _msgId, const std::string& _msg, ProtoInfo::ProtocolType ptype = ProtoInfo::ProtocolType::CHATMSG){
         if (_msg.empty() || _msg.size() > MAX_DATA_SIZE) {
             throw std::invalid_argument("Input msg Err, size :" + std::to_string(_msg.size()));
         }

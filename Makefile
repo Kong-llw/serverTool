@@ -33,7 +33,7 @@ dirs:
 	mkdir -p $(BINDIR) $(BUILDDIR)
 
 # Per-binary source lists (explicit so we can avoid accidental main collisions)
-SERVER_SRCS := $(SRCDIR)/Server.cpp $(SRCDIR)/JSONTranslator.cpp $(SRCDIR)/Room.cpp $(SRCDIR)/RoomManager.cpp $(SRCDIR)/GameRoom.cpp
+SERVER_SRCS := $(SRCDIR)/Server.cpp $(SRCDIR)/JSONTranslator.cpp $(SRCDIR)/Room.cpp $(SRCDIR)/RoomManager.cpp $(SRCDIR)/GameRoom.cpp $(SRCDIR)/PlayerManager.cpp $(SRCDIR)/SessionManager.cpp $(SRCDIR)/MessageDispatcher.cpp $(SRCDIR)/ClientSession.cpp
 
 SERVER_OBJS := $(patsubst $(SRCDIR)/%.cpp,$(BUILDDIR)/%.o,$(SERVER_SRCS))
 

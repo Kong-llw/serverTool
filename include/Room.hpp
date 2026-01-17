@@ -10,6 +10,7 @@
 #include <mutex>
 #include <memory>
 
+#include "Player.hpp"
 enum class RoomState { LOBBY = 0, RUNNING = 1 };
 
 // 房间操作返回码
@@ -30,6 +31,14 @@ enum class RoomResult {
     UNKNOWN_ERROR
 };
 
+struct RoomInListInfo{
+    std::string room_code;
+    std::string room_name;
+    size_t capacity;
+    size_t player_count;
+    RoomState state;
+};
+
 struct RoomInfo {
     uint64_t room_id;
     std::string room_code;
@@ -39,16 +48,7 @@ struct RoomInfo {
     size_t capacity;
     RoomState state;
     size_t player_count;
-    std::vector<uint64_t> player_ids;
-    std::unordered_map<uint64_t, bool> ready_status;
-};
-
-struct RoomInListInfo{
-    std::string room_code;
-    std::string room_name;
-    size_t capacity;
-    size_t player_count;
-    RoomState state;
+    std::vector<PlayerDataInRoom> player_infos;
 };
 
 // 房间不直接依赖 Session 类型；通过 send callback 注入通信能力
@@ -57,42 +57,44 @@ using SendCallback = std::function<void(uint64_t, const std::string&)>;
 
 class Room {
 public:
-    Room(uint64_t id, uint64_t owner_id, size_t capacity, const std::string& room_name,
-     const std::string room_code, const std::string password, SendCallback sender);
+    Room(uint64_t id, const std::shared_ptr<Player>& owner, uint32_t capacity, const std::string& room_name,
+     const std::string& room_code, const std::string& password, SendCallback sender);
     ~Room();
 
-    RoomInfo getInfo();
+    RoomInfo getAllInfo();
     RoomInListInfo getInListInfo();
+    std::vector<PlayerDataInRoom> getPlayerInfos();
 
-    std::vector<uint64_t> getPlayerIds();
+    const std::vector<std::shared_ptr<Player>>& getPlayers();
     // 加入/离开
-    RoomResult join(uint64_t player_id);
-    RoomResult leave(uint64_t player_id);
+    RoomResult join(const std::shared_ptr<Player>&);
+    RoomResult leave(const std::shared_ptr<Player>&);
 
     // 玩家准备/取消准备
-    RoomResult setReady(uint64_t player_id, bool ready);
-
+    RoomResult setReady(const std::shared_ptr<Player>&, bool ready);
     // 房主操作：设置容量、开始游戏
-    RoomResult setCapacity(uint64_t operator_id, size_t newcap);
-    RoomResult startGame(uint64_t operator_id);
+    bool isRoomOwner(const std::shared_ptr<Player>&);
+    RoomResult setCapacity(const std::shared_ptr<Player>&, uint32_t newcap);
+    RoomResult startGame(const std::shared_ptr<Player>&);
 
     // 广播/发送
     void broadcast(const std::string& message);
-    void sendTo(uint64_t player_id, const std::string& message);
+    void sendTo(uint64_t playerId, const std::string& message);
 
     // 查询玩家是否在线/在房间
-    bool containsPlayer(uint64_t player_id);
+    bool containsPlayer(const std::shared_ptr<Player>&);
+    std::shared_ptr<Player> GetPlayer(uint64_t playerId);
+    bool roomIsEmpty();
 
 private:
     uint64_t id_;
     std::string room_name_;
     std::string room_code_;
     std::string password_;
-    uint64_t owner_id_;
+    std::shared_ptr<Player> owner;
     size_t capacity_;
     RoomState state_;
-    std::vector<uint64_t> players_; // ordered list
-    std::unordered_map<uint64_t, bool> ready_map_;
+    std::vector<std::shared_ptr<Player>> players_;
 
     SendCallback sendFunc_;
     std::mutex mu_; // 保护房间状态
